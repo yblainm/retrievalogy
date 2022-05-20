@@ -1,5 +1,6 @@
 # Internal imports
-import nmslib
+from typing import List
+
 
 from ..util import DATA_PATH, download_url
 
@@ -7,8 +8,14 @@ from ..util import DATA_PATH, download_url
 import os
 import functools
 import pandas as pd
-import sentence_transformers
+import nmslib
 import h5py
+import sentence_transformers
+import fasttext
+from numba import jit, prange
+from numpy.typing import ArrayLike
+# from pandas import DataFrame
+from numba_progress import ProgressBar
 
 TATOEBA_EN_URL = "https://downloads.tatoeba.org/exports/per_language/eng/eng_sentences.tsv.bz2"
 
@@ -27,9 +34,19 @@ def load_or_download_tsv(bottom_length_percentile, source_local_path, source_url
 	return df
 
 
+# @jit(forceobj=True, parallel=True)
+def get_fasttext(vectorizer: fasttext.FastText, sentences: List[str], out_array: ArrayLike, progress_bar: ProgressBar = None):
+	# for i in tqdm(range(len(sentences))):
+	for i in range(len(sentences)):
+		out_array[i] = vectorizer.get_sentence_vector(sentences[i])
+		if progress_bar:
+			progress_bar.update(1)
+	return out_array
+
 class TatoebaEN:
 	def __init__(self, top_length_percentile=0.95, bottom_length_percentile=0.05, source_url=TATOEBA_EN_URL,
 				 vectorization_method="transformer", device=None):
+		assert vectorization_method in ("transformer", "fasttext")
 		file_name = os.path.basename(source_url)
 		source_local_path = os.path.realpath(os.path.join(DATA_PATH, file_name))
 		vectors_local_path = os.path.realpath(os.path.join(
@@ -45,34 +62,40 @@ class TatoebaEN:
 		)['text'].to_list()
 
 		index: nmslib.dist.FloatIndex
-		index = nmslib.init(data_type=nmslib.DataType.DENSE_VECTOR)
+		index = nmslib.init(
+			data_type=nmslib.DataType.DENSE_VECTOR,
+			space='cosinesimil' if vectorization_method == "transformer" else 'l2'
+		)
 		try:
 			index.loadIndex(index_local_path)
 		except RuntimeError as e:
-			vectors = self.get_vectors(device, vectors_local_path)
+			vectors = self.get_vectors(device, vectors_local_path, vectorization_method=vectorization_method)
 			index.addDataPointBatch(vectors)
 			index.createIndex(print_progress=True)
 			index.saveIndex(index_local_path)
 		self.index = index
 
-	def get_vectors(self, device, vectors_local_path, batch_size=128):
+	def get_vectors(self, device, vectors_local_path, batch_size=128, vectorization_method="transformer"):
 		try:
 			with h5py.File(vectors_local_path, 'r') as f:
 				vectors = f['vectors'][:]
 		except FileNotFoundError as e:  # No vectors yet
-			vectorizer = sentence_transformers.SentenceTransformer("all-mpnet-base-v2", device=device,
-																   cache_folder=DATA_PATH)
-			vectors = vectorizer.encode(self.sentences, batch_size=batch_size, show_progress_bar=True)
-			with h5py.File(vectors_local_path, 'w') as f:
-				f.create_dataset('vectors', data=vectors)
-		return vectors
+			if vectorization_method == "transformer":
+				vectorizer = sentence_transformers.SentenceTransformer("all-mpnet-base-v2", device=device,
+																	   cache_folder=DATA_PATH)
+				vectors = vectorizer.encode(self.sentences, batch_size=batch_size, show_progress_bar=True)
+				with h5py.File(vectors_local_path, 'w') as f:
+					f.create_dataset('vectors', data=vectors)
+			elif vectorization_method == "fasttext":
+				vectorizer = fasttext.load_model(os.path.realpath(os.path.join(
+					DATA_PATH, "cc.en.300.bin"
+				)))
+				with h5py.File(vectors_local_path, 'w') as f:
+					f.create_dataset('vectors', shape=(len(self.sentences), 300))
 
-	# i = 0
-			# num_batches = len(self.df) // batch_size
-			# remainder = len(self.df) % batch_size
-			# for i in tqdm.tqdm(range(num_batches)):
-			# 	cur_slice = slice(i*batch_size, (i+1)*batch_size)
-			# 	# do stuff
-			# 	batch = vectorizer.en
-			# 	pass
-			# cur_slice = slice(len(self.df) - remainder, len(self.df))
+					with ProgressBar(total=len(self.sentences)) as progress:
+						vectors = get_fasttext(vectorizer, self.sentences, f['vectors'], progress_bar=progress)
+						del vectorizer
+
+					vectors = vectors[:]
+		return vectors
