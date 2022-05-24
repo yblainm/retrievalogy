@@ -61,6 +61,8 @@ class TatoebaEN:
 			top_length_percentile
 		)['text'].to_list()
 
+		self.vectors = self.get_vectors(device, vectors_local_path, vectorization_method=vectorization_method)
+
 		index: nmslib.dist.FloatIndex
 		index = nmslib.init(
 			data_type=nmslib.DataType.DENSE_VECTOR,
@@ -69,8 +71,7 @@ class TatoebaEN:
 		try:
 			index.loadIndex(index_local_path)
 		except RuntimeError as e:
-			vectors = self.get_vectors(device, vectors_local_path, vectorization_method=vectorization_method)
-			index.addDataPointBatch(vectors)
+			index.addDataPointBatch(self.vectors)
 			index.createIndex(print_progress=True)
 			index.saveIndex(index_local_path)
 		self.index = index
